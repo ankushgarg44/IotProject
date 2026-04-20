@@ -11,7 +11,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.example.ebike"
+        applicationId = "com.iot_project.Ebike"
         minSdk = 24
         targetSdk = 35
         versionCode = 1
