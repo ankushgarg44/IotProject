@@ -1,0 +1,12 @@
+# Project exclude paths
+/.gradle/
+/build/
+.fake
+.agent/
+
+# Firebase credentials (DO NOT commit!)
+app/google-services.json
+backend/serviceAccountKey.json
+
+# OS files
+.DS_Store
