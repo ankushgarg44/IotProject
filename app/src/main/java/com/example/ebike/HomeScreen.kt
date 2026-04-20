@@ -50,7 +50,7 @@ fun HomeScreen(viewModel: EbikeViewModel = viewModel()) {
         ) {
             NavigationControls(viewModel = viewModel)
             Spacer(modifier = Modifier.height(10.dp))
-            HardwareTestControls()
+            HardwareTestControls(viewModel = viewModel)
             Spacer(modifier = Modifier.height(10.dp))
             TurnInstructionCard(viewModel = viewModel)
         }

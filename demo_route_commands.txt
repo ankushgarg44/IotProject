@@ -1,21 +1,18 @@
-Indoor demo route for Firebase realtime testing
+Indoor route demo for Firebase realtime testing
 
-This script is meant to verify the full app -> Firebase -> ESP32 path without going outside.
+This project now builds the demo script from the actual destination route calculated by OSRM.
 
-Sequence:
-1. STRAIGHT after 1.5s
-2. LEFT after 2.0s
-3. STRAIGHT after 1.5s
-4. RIGHT after 2.0s
-5. STRAIGHT after 1.5s
-6. UTURN after 2.5s
+Flow:
+1. Enter destination in lat,lon format.
+2. Tap Start Navigation.
+3. Route steps and turn directions are loaded into route demo.
+4. Tap RUN LOADED ROUTE DEMO.
+5. App replays each route command to Firebase with timed delays.
 
 Firebase path used by the app:
 bike_commands/direction
 
-How to use:
-- Open the app.
-- Keep Wi-Fi and Firebase online.
-- Press RUN DEMO ROUTE in Hardware Test Controls.
-- Watch the Firebase Realtime Database value update step by step.
-- Confirm the ESP32 reacts to each change.
+Notes:
+- Commands are generated from route maneuvers (LEFT, RIGHT, UTURN, STRAIGHT).
+- Delay per command is estimated from each route step distance.
+- This verifies app -> Firebase -> ESP32 behavior without moving outside.

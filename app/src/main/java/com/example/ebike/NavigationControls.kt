@@ -78,6 +78,12 @@ fun NavigationControls(viewModel: EbikeViewModel) {
                 Text("Start Navigation")
             }
 
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "Demo route: ${viewModel.routeDemoSteps.size} directions loaded",
+                color = Color(0xFF5A5A5A)
+            )
+
             if (parseError != null) {
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(text = parseError ?: "", color = Color(0xFFD32F2F))

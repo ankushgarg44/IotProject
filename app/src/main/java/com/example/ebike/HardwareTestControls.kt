@@ -12,25 +12,16 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.compose.runtime.rememberCoroutineScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 @Composable
-fun HardwareTestControls() {
+fun HardwareTestControls(viewModel: EbikeViewModel) {
     val context = LocalContext.current
     val firebaseCommandSender = remember { FirebaseCommandSender() }
-    val coroutineScope = rememberCoroutineScope()
-    var isRunningDemo by remember { mutableStateOf(false) }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -47,33 +38,16 @@ fun HardwareTestControls() {
 
             Button(
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !isRunningDemo,
+                enabled = viewModel.routeDemoSteps.isNotEmpty() && !viewModel.isRouteDemoRunning,
                 onClick = {
-                    coroutineScope.launch {
-                        isRunningDemo = true
-                        try {
-                            DemoRouteScript.steps.forEachIndexed { index, step ->
-                                firebaseCommandSender.sendCommand(step.command) { success, errorMessage ->
-                                    val message = if (success) {
-                                        "Demo step ${index + 1}: ${step.label} sent"
-                                    } else {
-                                        "Demo step ${index + 1} failed: ${errorMessage ?: "network error"}"
-                                    }
-                                    Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
-                                }
-                                delay(step.delayMillis)
-                            }
-                        } finally {
-                            isRunningDemo = false
-                        }
-                    }
+                    viewModel.runLoadedRouteDemo()
                 }
             ) {
-                Text(if (isRunningDemo) "RUNNING DEMO ROUTE" else "RUN DEMO ROUTE")
+                Text(if (viewModel.isRouteDemoRunning) "RUNNING LOADED ROUTE DEMO" else "RUN LOADED ROUTE DEMO")
             }
 
             Text(
-                text = "Uses Firebase path: bike_commands/direction",
+                text = "${viewModel.routeDemoStatus} (${viewModel.routeDemoProgress}/${viewModel.routeDemoSteps.size})",
                 color = Color(0xFF5A5A5A)
             )
 

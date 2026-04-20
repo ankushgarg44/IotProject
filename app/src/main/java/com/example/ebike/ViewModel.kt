@@ -16,6 +16,7 @@ import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.osmdroid.util.GeoPoint
 import retrofit2.Call
@@ -61,6 +62,14 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
     var totalSteps by mutableStateOf(0)
         private set
     var upcomingManeuverPoint by mutableStateOf<GeoPoint?>(null)
+        private set
+    var routeDemoSteps by mutableStateOf<List<RouteDemoStep>>(emptyList())
+        private set
+    var routeDemoProgress by mutableStateOf(0)
+        private set
+    var isRouteDemoRunning by mutableStateOf(false)
+        private set
+    var routeDemoStatus by mutableStateOf("No route demo loaded")
         private set
 
     private var currentSteps: List<OsrmStep> = emptyList()
@@ -118,6 +127,10 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
         triggeredSteps.clear()
         lockedCommandStep = -1
         upcomingManeuverPoint = null
+        routeDemoSteps = emptyList()
+        routeDemoProgress = 0
+        isRouteDemoRunning = false
+        routeDemoStatus = "Calculating route demo..."
         
         // Ensure format is longitude,latitude
         val coords = "$longitude,$latitude;$destLon,$destLat"
@@ -149,6 +162,13 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
                         }.let { if (it == -1) 0 else it }
 
                         updateUpcomingManeuverMarker()
+                        routeDemoSteps = buildRouteDemoSteps(currentSteps)
+                        routeDemoProgress = 0
+                        routeDemoStatus = if (routeDemoSteps.isEmpty()) {
+                            "No maneuver steps available for demo"
+                        } else {
+                            "Loaded ${routeDemoSteps.size} route directions for demo"
+                        }
                         errorMessage = null
                         
                         updateNextInstruction(distance = 0f)
@@ -156,13 +176,67 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 } else {
                     errorMessage = "Failed to fetch route. Code: ${response.code()}"
+                    routeDemoStatus = "Failed to load route demo"
                 }
             }
 
             override fun onFailure(call: Call<OsrmResponse>, t: Throwable) {
                 errorMessage = "API Error: ${t.message}"
+                routeDemoStatus = "Failed to load route demo"
             }
         })
+    }
+
+    private fun buildRouteDemoSteps(steps: List<OsrmStep>): List<RouteDemoStep> {
+        return steps.mapIndexed { index, step ->
+            val type = step.maneuver?.type?.uppercase().orEmpty().ifBlank { "STEP" }
+            val modifier = step.maneuver?.modifier?.uppercase().orEmpty()
+            val roadName = step.name.orEmpty()
+            val command = mapStepToCommand(step)
+            val baseLabel = if (modifier.isNotBlank()) "$type $modifier" else type
+            val label = if (roadName.isNotBlank()) {
+                "${index + 1}. $baseLabel on $roadName"
+            } else {
+                "${index + 1}. $baseLabel"
+            }
+
+            val distanceMeters = step.distance ?: 20.0
+            val delayMillis = ((distanceMeters / 6.0) * 1000).toLong().coerceIn(1200L, 4500L)
+
+            RouteDemoStep(
+                label = label,
+                command = command,
+                delayMillis = delayMillis,
+                distanceMeters = distanceMeters
+            )
+        }
+    }
+
+    fun runLoadedRouteDemo() {
+        if (isRouteDemoRunning) return
+        if (routeDemoSteps.isEmpty()) {
+            errorMessage = "No route demo loaded. Calculate a destination route first."
+            routeDemoStatus = "No route demo loaded"
+            return
+        }
+
+        viewModelScope.launch {
+            isRouteDemoRunning = true
+            routeDemoProgress = 0
+            routeDemoStatus = "Running route demo..."
+
+            try {
+                routeDemoSteps.forEachIndexed { index, step ->
+                    routeDemoProgress = index + 1
+                    routeDemoStatus = "Sending ${index + 1}/${routeDemoSteps.size}: ${step.command}"
+                    sendNavigationCommandToFirebase(step.command)
+                    delay(step.delayMillis)
+                }
+                routeDemoStatus = "Route demo complete"
+            } finally {
+                isRouteDemoRunning = false
+            }
+        }
     }
 
     private fun checkManeuvers(currentLocation: Location) {
@@ -273,3 +347,10 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
         isRotatingMap = enabled
     }
 }
+
+data class RouteDemoStep(
+    val label: String,
+    val command: String,
+    val delayMillis: Long,
+    val distanceMeters: Double
+)
