@@ -1,0 +1,21 @@
+Indoor demo route for Firebase realtime testing
+
+This script is meant to verify the full app -> Firebase -> ESP32 path without going outside.
+
+Sequence:
+1. STRAIGHT after 1.5s
+2. LEFT after 2.0s
+3. STRAIGHT after 1.5s
+4. RIGHT after 2.0s
+5. STRAIGHT after 1.5s
+6. UTURN after 2.5s
+
+Firebase path used by the app:
+bike_commands/direction
+
+How to use:
+- Open the app.
+- Keep Wi-Fi and Firebase online.
+- Press RUN DEMO ROUTE in Hardware Test Controls.
+- Watch the Firebase Realtime Database value update step by step.
+- Confirm the ESP32 reacts to each change.

@@ -16,19 +16,20 @@ import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.osmdroid.util.GeoPoint
 import retrofit2.Call
 import retrofit2.Callback
 import retrofit2.Response
+import com.example.ebike.FirebaseCommandSender
 
 class EbikeViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val TAG = "EbikeNavigation"
         private const val TURN_TRIGGER_METERS = 25f
     }
+
+    private val firebaseCommandSender = FirebaseCommandSender()
 
     // Current State
     var latitude by mutableStateOf(0.0)
@@ -190,7 +191,7 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
             val command = mapStepToCommand(nextStep)
             triggeredSteps.add(currentStepIndex)
             lockedCommandStep = currentStepIndex
-            sendEsp32CommandWithRetry(command)
+            sendNavigationCommandToFirebase(command)
             
             advanceStep()
         }
@@ -249,30 +250,16 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun sendEsp32CommandWithRetry(command: String) {
-        Log.d(TAG, "Sending command to ESP32: $command")
+    private fun sendNavigationCommandToFirebase(command: String) {
+        Log.d("NAVIGATION", "Sending direction to Firebase: $command")
 
-        viewModelScope.launch(Dispatchers.IO) {
-            var sent = false
-            for (attempt in 1..3) {
-                try {
-                    val response = Esp32Client.api.sendDirectionCommand(
-                        DirectionCommandRequest(direction = command)
-                    ).execute()
-                    if (response.isSuccessful) {
-                        Log.d(TAG, "ESP32 command success: $command (attempt $attempt)")
-                        sent = true
-                        break
-                    }
-                    Log.w(TAG, "ESP32 command failed HTTP ${response.code()} (attempt $attempt)")
-                } catch (e: Exception) {
-                    Log.e(TAG, "ESP32 command error (attempt $attempt): ${e.message}")
-                }
-            }
-
-            if (!sent) {
-                withContext(Dispatchers.Main) {
-                    errorMessage = "Failed to send command $command to ESP32"
+        firebaseCommandSender.sendCommand(command) { success, errorMessage ->
+            if (success) {
+                Log.d("NAVIGATION", "Firebase command success: $command")
+            } else {
+                Log.e("NAVIGATION", "Firebase command failed: $errorMessage")
+                viewModelScope.launch {
+                    this@EbikeViewModel.errorMessage = "Failed to send $command to Firebase: $errorMessage"
                 }
             }
         }
