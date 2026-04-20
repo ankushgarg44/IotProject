@@ -19,6 +19,8 @@ import com.google.android.gms.location.Priority
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.osmdroid.util.GeoPoint
+import org.json.JSONArray
+import org.json.JSONObject
 import retrofit2.Call
 import retrofit2.Callback
 import retrofit2.Response
@@ -75,6 +77,10 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
     private var currentSteps: List<OsrmStep> = emptyList()
     private var triggeredSteps: MutableSet<Int> = mutableSetOf()
     private var lockedCommandStep: Int = -1
+    private var currentRouteStartLat: Double? = null
+    private var currentRouteStartLon: Double? = null
+    private var currentRouteDestLat: Double? = null
+    private var currentRouteDestLon: Double? = null
 
     private val fusedLocationClient: FusedLocationProviderClient = 
         LocationServices.getFusedLocationProviderClient(application)
@@ -131,6 +137,10 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
         routeDemoProgress = 0
         isRouteDemoRunning = false
         routeDemoStatus = "Calculating route demo..."
+        currentRouteStartLat = latitude
+        currentRouteStartLon = longitude
+        currentRouteDestLat = destLat
+        currentRouteDestLon = destLon
         
         // Ensure format is longitude,latitude
         val coords = "$longitude,$latitude;$destLon,$destLat"
@@ -237,6 +247,36 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
                 isRouteDemoRunning = false
             }
         }
+    }
+
+    fun getRouteDemoJson(): String {
+        val stepsArray = JSONArray()
+        routeDemoSteps.forEachIndexed { index, step ->
+            stepsArray.put(
+                JSONObject()
+                    .put("index", index + 1)
+                    .put("label", step.label)
+                    .put("command", step.command)
+                    .put("delayMillis", step.delayMillis)
+                    .put("distanceMeters", step.distanceMeters)
+            )
+        }
+
+        val payload = JSONObject()
+            .put("generatedAtEpochMs", System.currentTimeMillis())
+            .put("source", "Ebike route demo")
+            .put("start", JSONObject()
+                .put("lat", currentRouteStartLat)
+                .put("lon", currentRouteStartLon)
+            )
+            .put("destination", JSONObject()
+                .put("lat", currentRouteDestLat)
+                .put("lon", currentRouteDestLon)
+            )
+            .put("stepCount", routeDemoSteps.size)
+            .put("steps", stepsArray)
+
+        return payload.toString(2)
     }
 
     private fun checkManeuvers(currentLocation: Location) {

@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.dp
 fun NavigationControls(viewModel: EbikeViewModel) {
     var destinationText by remember { mutableStateOf("") }
     var parseError by remember { mutableStateOf<String?>(null) }
+    var showMapOptions by remember { mutableStateOf(false) }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -91,28 +92,37 @@ fun NavigationControls(viewModel: EbikeViewModel) {
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            Row(
+            Button(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                onClick = { showMapOptions = !showMapOptions }
             ) {
-                Text("Follow camera")
-                Switch(
-                    checked = viewModel.isFollowingUser,
-                    onCheckedChange = { viewModel.setFollowUser(it) }
-                )
+                Text(if (showMapOptions) "Hide Map Options" else "Show Map Options")
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text("Rotate map")
-                Switch(
-                    checked = viewModel.isRotatingMap,
-                    onCheckedChange = { viewModel.setRotateMap(it) }
-                )
+            if (showMapOptions) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Follow camera")
+                    Switch(
+                        checked = viewModel.isFollowingUser,
+                        onCheckedChange = { viewModel.setFollowUser(it) }
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Rotate map")
+                    Switch(
+                        checked = viewModel.isRotatingMap,
+                        onCheckedChange = { viewModel.setRotateMap(it) }
+                    )
+                }
             }
         }
     }
