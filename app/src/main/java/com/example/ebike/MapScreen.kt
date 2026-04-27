@@ -86,6 +86,12 @@ fun MapScreen(viewModel: EbikeViewModel) {
         mapView.invalidate()
     }
 
+    LaunchedEffect(viewModel.recenterSignal) {
+        if (viewModel.latitude != 0.0 || viewModel.longitude != 0.0) {
+            mapView.controller.animateTo(GeoPoint(viewModel.latitude, viewModel.longitude))
+        }
+    }
+
     AndroidView(
         factory = { mapView },
         modifier = Modifier.fillMaxSize(),

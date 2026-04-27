@@ -29,7 +29,17 @@ import com.example.ebike.FirebaseCommandSender
 class EbikeViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val TAG = "EbikeNavigation"
-        private const val TURN_TRIGGER_METERS = 25f
+        private const val TURN_TRIGGER_METERS = 20f
+        private const val OFF_ROUTE_THRESHOLD_METERS = 40.0
+        private const val OFF_ROUTE_EXIT_THRESHOLD_METERS = 25.0
+        private const val OFF_ROUTE_CONFIRM_TICKS = 3
+        private const val REROUTE_COOLDOWN_MS = 10_000L
+        private const val OFF_ROUTE_CHECK_INTERVAL_MS = 2_000L
+        private const val MIN_MOVEMENT_METERS = 2f
+        private const val MIN_PROCESS_INTERVAL_MS = 800L
+        private const val STEP_RECOVERY_DISTANCE_METERS = 35f
+        private const val MIN_REROUTE_ORIGIN_SHIFT_METERS = 15f
+        private const val DISTANCE_SMOOTHING_ALPHA = 0.35f
     }
 
     private val firebaseCommandSender = FirebaseCommandSender()
@@ -73,14 +83,43 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var routeDemoStatus by mutableStateOf("No route demo loaded")
         private set
+    var isNavigating by mutableStateOf(false)
+        private set
+    var nextTurn by mutableStateOf("Ready")
+        private set
+    var distanceToTurn by mutableStateOf(0f)
+        private set
+    var routeLoaded by mutableStateOf(false)
+        private set
+    var distanceRemainingMeters by mutableStateOf(0)
+        private set
+    var etaMinutes by mutableStateOf(0)
+        private set
+    var recenterSignal by mutableStateOf(0)
+        private set
+    var isRerouting by mutableStateOf(false)
+        private set
+    var offRouteDistanceMeters by mutableStateOf(0f)
+        private set
 
     private var currentSteps: List<OsrmStep> = emptyList()
     private var triggeredSteps: MutableSet<Int> = mutableSetOf()
     private var lockedCommandStep: Int = -1
+    private var lastSentCommand: String? = null
+    private var lastSentStepIndex: Int = -1
     private var currentRouteStartLat: Double? = null
     private var currentRouteStartLon: Double? = null
     private var currentRouteDestLat: Double? = null
     private var currentRouteDestLon: Double? = null
+    private var rerouteInFlight: Boolean = false
+    private var lastRerouteEpochMs: Long = 0L
+    private var lastProcessedLocation: Location? = null
+    private var lastProcessedAtMs: Long = 0L
+    private var offRouteConsecutiveTicks: Int = 0
+    private var smoothedDistanceToTurn: Float? = null
+    private var smoothedOffRouteDistance: Float? = null
+    private var lastOffRouteCheckAtMs: Long = 0L
+    private var lastRerouteOriginLocation: Location? = null
 
     private val fusedLocationClient: FusedLocationProviderClient = 
         LocationServices.getFusedLocationProviderClient(application)
@@ -96,7 +135,7 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
 
             Log.d(TAG, "GPS update lat=$latitude lon=$longitude speed=${"%.2f".format(speed)} heading=$heading")
 
-            checkManeuvers(location)
+            processNavigationTick(location)
         }
     }
 
@@ -126,24 +165,60 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        currentStepIndex = 0
-        totalSteps = 0
-        nextInstruction = "Calculating route..."
-        distanceToNextTurnMeters = 0f
-        triggeredSteps.clear()
-        lockedCommandStep = -1
-        upcomingManeuverPoint = null
-        routeDemoSteps = emptyList()
-        routeDemoProgress = 0
-        isRouteDemoRunning = false
-        routeDemoStatus = "Calculating route demo..."
-        currentRouteStartLat = latitude
-        currentRouteStartLon = longitude
+        requestRoute(
+            originLat = latitude,
+            originLon = longitude,
+            destLat = destLat,
+            destLon = destLon,
+            isReroute = false
+        )
+    }
+
+    private fun requestRoute(
+        originLat: Double,
+        originLon: Double,
+        destLat: Double,
+        destLon: Double,
+        isReroute: Boolean
+    ) {
+
+        if (!isReroute) {
+            currentStepIndex = 0
+            totalSteps = 0
+            nextInstruction = "Calculating route..."
+            distanceToNextTurnMeters = 0f
+            triggeredSteps.clear()
+            lockedCommandStep = -1
+            upcomingManeuverPoint = null
+            routeDemoSteps = emptyList()
+            routeDemoProgress = 0
+            isRouteDemoRunning = false
+            routeDemoStatus = "Calculating route demo..."
+            routeLoaded = false
+            distanceRemainingMeters = 0
+            etaMinutes = 0
+            nextTurn = nextInstruction
+            distanceToTurn = 0f
+            offRouteConsecutiveTicks = 0
+            smoothedDistanceToTurn = null
+            smoothedOffRouteDistance = null
+        } else {
+            routeDemoStatus = "Rerouting route demo..."
+        }
+
+        currentRouteStartLat = originLat
+        currentRouteStartLon = originLon
         currentRouteDestLat = destLat
         currentRouteDestLon = destLon
+        if (isReroute) {
+            isRerouting = true
+        } else {
+            isNavigating = false
+        }
+        lastSentStepIndex = -1
         
         // Ensure format is longitude,latitude
-        val coords = "$longitude,$latitude;$destLon,$destLat"
+        val coords = "$originLon,$originLat;$destLon,$destLat"
         
         RoutingClient.api.getRoute(coords).enqueue(object : Callback<OsrmResponse> {
             override fun onResponse(call: Call<OsrmResponse>, response: Response<OsrmResponse>) {
@@ -179,6 +254,14 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
                         } else {
                             "Loaded ${routeDemoSteps.size} route directions for demo"
                         }
+                        routeLoaded = routePolyline.isNotEmpty() && currentSteps.isNotEmpty()
+                        if (isReroute) {
+                            routeDemoStatus = "Reroute complete: ${routeDemoSteps.size} directions loaded"
+                        }
+                        offRouteConsecutiveTicks = 0
+                        smoothedDistanceToTurn = null
+                        smoothedOffRouteDistance = null
+                        refreshCompactNavMetrics()
                         errorMessage = null
                         
                         updateNextInstruction(distance = 0f)
@@ -187,12 +270,22 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
                 } else {
                     errorMessage = "Failed to fetch route. Code: ${response.code()}"
                     routeDemoStatus = "Failed to load route demo"
+                    if (!isReroute) {
+                        routeLoaded = false
+                    }
                 }
+                rerouteInFlight = false
+                isRerouting = false
             }
 
             override fun onFailure(call: Call<OsrmResponse>, t: Throwable) {
                 errorMessage = "API Error: ${t.message}"
                 routeDemoStatus = "Failed to load route demo"
+                if (!isReroute) {
+                    routeLoaded = false
+                }
+                rerouteInFlight = false
+                isRerouting = false
             }
         })
     }
@@ -239,7 +332,7 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
                 routeDemoSteps.forEachIndexed { index, step ->
                     routeDemoProgress = index + 1
                     routeDemoStatus = "Sending ${index + 1}/${routeDemoSteps.size}: ${step.command}"
-                    sendNavigationCommandToFirebase(step.command)
+                    sendNavigationCommandToFirebase(step.command, stepIndex = index, allowDuplicate = true)
                     delay(step.delayMillis)
                 }
                 routeDemoStatus = "Route demo complete"
@@ -247,6 +340,159 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
                 isRouteDemoRunning = false
             }
         }
+    }
+
+    fun startNavigationMode() {
+        if (!routeLoaded) {
+            errorMessage = "Load a route first"
+            return
+        }
+        isNavigating = true
+        refreshCompactNavMetrics()
+    }
+
+    fun stopNavigationMode() {
+        isNavigating = false
+    }
+
+    fun recenterOnUser() {
+        recenterSignal++
+    }
+
+    private fun processNavigationTick(currentLocation: Location) {
+        val now = System.currentTimeMillis()
+        val previous = lastProcessedLocation
+        if (previous != null) {
+            val movement = previous.distanceTo(currentLocation)
+            val elapsed = now - lastProcessedAtMs
+            if (movement < MIN_MOVEMENT_METERS && elapsed < MIN_PROCESS_INTERVAL_MS) {
+                return
+            }
+        }
+
+        lastProcessedLocation = Location(currentLocation)
+        lastProcessedAtMs = now
+
+        if (!routeLoaded || currentSteps.isEmpty()) return
+
+        recoverStepIfMissedTurn(currentLocation)
+        checkManeuvers(currentLocation)
+
+        if (isNavigating) {
+            if ((now - lastOffRouteCheckAtMs) >= OFF_ROUTE_CHECK_INTERVAL_MS) {
+                lastOffRouteCheckAtMs = now
+                checkOffRouteAndRerouteIfNeeded(currentLocation, now)
+            }
+        }
+    }
+
+    private fun recoverStepIfMissedTurn(currentLocation: Location) {
+        if (currentStepIndex !in currentSteps.indices) return
+
+        val lookAheadEnd = (currentStepIndex + 3).coerceAtMost(currentSteps.lastIndex)
+        var bestIndex = currentStepIndex
+        var bestDistance = Float.MAX_VALUE
+
+        for (i in currentStepIndex..lookAheadEnd) {
+            val maneuverLoc = currentSteps[i].maneuver?.location ?: continue
+            if (maneuverLoc.size < 2) continue
+
+            val stepLocation = Location("").apply {
+                longitude = maneuverLoc[0]
+                latitude = maneuverLoc[1]
+            }
+            val d = currentLocation.distanceTo(stepLocation)
+            if (d < bestDistance) {
+                bestDistance = d
+                bestIndex = i
+            }
+        }
+
+        if (bestIndex > currentStepIndex && bestDistance < STEP_RECOVERY_DISTANCE_METERS) {
+            currentStepIndex = bestIndex
+            updateUpcomingManeuverMarker()
+            Log.d(TAG, "Recovered missed turn. Jumped to step $currentStepIndex")
+        }
+    }
+
+    private fun checkOffRouteAndRerouteIfNeeded(currentLocation: Location, nowMs: Long) {
+        if (routePolyline.size < 2) return
+
+        val rawDistance = distanceToPolylineMeters(currentLocation, routePolyline).toFloat()
+        smoothedOffRouteDistance = if (smoothedOffRouteDistance == null) {
+            rawDistance
+        } else {
+            smoothedOffRouteDistance!! + DISTANCE_SMOOTHING_ALPHA * (rawDistance - smoothedOffRouteDistance!!)
+        }
+
+        val distance = smoothedOffRouteDistance ?: rawDistance
+        if (kotlin.math.abs(distance - offRouteDistanceMeters) >= 1f) {
+            offRouteDistanceMeters = distance
+        }
+
+        offRouteConsecutiveTicks = when {
+            distance > OFF_ROUTE_THRESHOLD_METERS -> (offRouteConsecutiveTicks + 1).coerceAtMost(OFF_ROUTE_CONFIRM_TICKS + 2)
+            distance < OFF_ROUTE_EXIT_THRESHOLD_METERS -> 0
+            else -> offRouteConsecutiveTicks
+        }
+
+        val canReroute = !rerouteInFlight && (nowMs - lastRerouteEpochMs) > REROUTE_COOLDOWN_MS
+        val originShiftEnough = lastRerouteOriginLocation?.distanceTo(currentLocation)?.let {
+            it >= MIN_REROUTE_ORIGIN_SHIFT_METERS
+        } ?: true
+
+        if (offRouteConsecutiveTicks >= OFF_ROUTE_CONFIRM_TICKS && canReroute && originShiftEnough) {
+            val destLat = currentRouteDestLat
+            val destLon = currentRouteDestLon
+            if (destLat != null && destLon != null) {
+                rerouteInFlight = true
+                lastRerouteEpochMs = nowMs
+                lastRerouteOriginLocation = Location(currentLocation)
+                Log.w(TAG, "Off-route detected (${distance.toInt()}m). Triggering reroute...")
+                requestRoute(
+                    originLat = currentLocation.latitude,
+                    originLon = currentLocation.longitude,
+                    destLat = destLat,
+                    destLon = destLon,
+                    isReroute = true
+                )
+            }
+        }
+    }
+
+    private fun distanceToPolylineMeters(currentLocation: Location, polyline: List<GeoPoint>): Double {
+        if (polyline.size < 2) return Double.MAX_VALUE
+
+        val lat0 = Math.toRadians(currentLocation.latitude)
+        fun project(lat: Double, lon: Double): Pair<Double, Double> {
+            val x = lon * 111320.0 * kotlin.math.cos(lat0)
+            val y = lat * 110540.0
+            return x to y
+        }
+
+        val (px, py) = project(currentLocation.latitude, currentLocation.longitude)
+        var minDistance = Double.MAX_VALUE
+
+        for (i in 0 until polyline.lastIndex) {
+            val a = polyline[i]
+            val b = polyline[i + 1]
+            val (ax, ay) = project(a.latitude, a.longitude)
+            val (bx, by) = project(b.latitude, b.longitude)
+
+            val dx = bx - ax
+            val dy = by - ay
+            val len2 = dx * dx + dy * dy
+            val t = if (len2 == 0.0) 0.0 else (((px - ax) * dx + (py - ay) * dy) / len2).coerceIn(0.0, 1.0)
+
+            val projX = ax + t * dx
+            val projY = ay + t * dy
+            val dist = kotlin.math.hypot(px - projX, py - projY)
+            if (dist < minDistance) {
+                minDistance = dist
+            }
+        }
+
+        return minDistance
     }
 
     fun getRouteDemoJson(): String {
@@ -292,20 +538,32 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
         }
         
         // Calculate dynamic distance to the turn maneuver
-        val distanceToTurn = currentLocation.distanceTo(maneuverLocation)
-        distanceToNextTurnMeters = distanceToTurn
-        Log.d(TAG, "Distance to step[$currentStepIndex]: ${"%.2f".format(distanceToTurn)}m")
-        
-        updateNextInstruction(distanceToTurn)
+        val rawDistanceToTurn = currentLocation.distanceTo(maneuverLocation)
+        smoothedDistanceToTurn = if (smoothedDistanceToTurn == null) {
+            rawDistanceToTurn
+        } else {
+            smoothedDistanceToTurn!! + DISTANCE_SMOOTHING_ALPHA * (rawDistanceToTurn - smoothedDistanceToTurn!!)
+        }
 
-        if (distanceToTurn < TURN_TRIGGER_METERS &&
+        val distanceToTurn = smoothedDistanceToTurn ?: rawDistanceToTurn
+        if (kotlin.math.abs(distanceToTurn - distanceToNextTurnMeters) >= 1f) {
+            distanceToNextTurnMeters = distanceToTurn
+            updateNextInstruction(distanceToTurn)
+            refreshCompactNavMetrics()
+        }
+        Log.d(TAG, "Distance to step[$currentStepIndex]: ${"%.2f".format(rawDistanceToTurn)}m (smoothed=${"%.2f".format(distanceToTurn)})")
+
+        val triggerDistance = kotlin.math.min(rawDistanceToTurn, distanceToTurn)
+
+        if (isNavigating &&
+            triggerDistance < TURN_TRIGGER_METERS &&
             currentStepIndex !in triggeredSteps &&
             currentStepIndex != lockedCommandStep
         ) {
             val command = mapStepToCommand(nextStep)
             triggeredSteps.add(currentStepIndex)
             lockedCommandStep = currentStepIndex
-            sendNavigationCommandToFirebase(command)
+            sendNavigationCommandToFirebase(command, stepIndex = currentStepIndex)
             
             advanceStep()
         }
@@ -316,25 +574,60 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
         updateUpcomingManeuverMarker()
         if (currentStepIndex < currentSteps.size) {
             updateNextInstruction(distance = 0f)
+            refreshCompactNavMetrics()
             Log.d(TAG, "Moved to step $currentStepIndex")
         } else {
             nextInstruction = "Arrived at destination"
             distanceToNextTurnMeters = 0f
+            refreshCompactNavMetrics()
             Log.d(TAG, "Navigation complete")
         }
     }
 
     private fun updateNextInstruction(distance: Float) {
-        if (currentStepIndex >= 0 && currentStepIndex < currentSteps.size) {
-            val step = currentSteps[currentStepIndex]
-            val mod = mapStepToCommand(step)
-            nextInstruction = if (distance > 0) {
-                "$mod in ${distance.toInt()}m"
-            } else {
-                "$mod ahead"
+        val computedInstruction = when {
+            currentStepIndex >= 0 && currentStepIndex < currentSteps.size -> {
+                val step = currentSteps[currentStepIndex]
+                val mod = mapStepToCommand(step)
+                if (distance > 0) {
+                    "$mod in ${distance.toInt()}m"
+                } else {
+                    "$mod ahead"
+                }
             }
-        } else if (currentStepIndex >= currentSteps.size) {
-            nextInstruction = "Arrived at destination"
+            currentStepIndex >= currentSteps.size -> "Arrived at destination"
+            else -> nextInstruction
+        }
+
+        if (computedInstruction != nextInstruction) {
+            nextInstruction = computedInstruction
+        }
+        if (nextTurn != nextInstruction) {
+            nextTurn = nextInstruction
+        }
+        distanceToTurn = distanceToNextTurnMeters
+    }
+
+    private fun refreshCompactNavMetrics() {
+        val remaining = if (currentStepIndex in currentSteps.indices) {
+            currentSteps.subList(currentStepIndex, currentSteps.size).sumOf { (it.distance ?: 0.0) }
+        } else {
+            0.0
+        }
+
+        val remainingInt = remaining.toInt()
+        if (remainingInt != distanceRemainingMeters) {
+            distanceRemainingMeters = remainingInt
+        }
+
+        val eta = (remaining / 8.33 / 60.0).toInt().coerceAtLeast(0) // ~30 km/h average moving speed
+        if (eta != etaMinutes) {
+            etaMinutes = eta
+        }
+
+        distanceToTurn = distanceToNextTurnMeters
+        if (nextTurn != nextInstruction) {
+            nextTurn = nextInstruction
         }
     }
 
@@ -364,7 +657,18 @@ class EbikeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun sendNavigationCommandToFirebase(command: String) {
+    private fun sendNavigationCommandToFirebase(
+        command: String,
+        stepIndex: Int,
+        allowDuplicate: Boolean = false
+    ) {
+        if (!allowDuplicate && command == lastSentCommand && stepIndex == lastSentStepIndex) {
+            Log.d("NAVIGATION", "Skipping duplicate command=$command step=$stepIndex")
+            return
+        }
+
+        lastSentCommand = command
+        lastSentStepIndex = stepIndex
         Log.d("NAVIGATION", "Sending direction to Firebase: $command")
 
         firebaseCommandSender.sendCommand(command) { success, errorMessage ->
